@@ -71,6 +71,7 @@ struct Termion {
     command_history: Vec<String>, // Store all commands TODO: Add delete button, add persistence
     current_command: String,      // Tracks current command pre enter press
     cursor_pos: (usize, usize),   // Window space and scroll back
+    prev_cursor_pos: (usize, usize),
     character_size: Option<(f32, f32)>,
 }
 
@@ -88,6 +89,7 @@ impl Termion {
             command_history: Vec::new(),
             current_command: String::new(),
             cursor_pos: (0, 0),
+            prev_cursor_pos: (0, 0),
             character_size: None,
         }
     }
@@ -263,8 +265,11 @@ impl eframe::App for Termion {
                     );
                     painter.rect_filled(cursor_rect, 0.0, egui::Color32::GREEN);
 
-                    // Auto-scroll to keep cursor visible
-                    ui.scroll_to_rect(cursor_rect, Some(egui::Align::Center));
+                    // Auto-scroll to keep cursor visible only when cursor moves
+                    if self.cursor_pos != self.prev_cursor_pos {
+                        ui.scroll_to_rect(cursor_rect, Some(egui::Align::Max));
+                        self.prev_cursor_pos = self.cursor_pos;
+                    }
                     ctx.request_repaint(); // Explicitly request a repaint
                 });
         });
