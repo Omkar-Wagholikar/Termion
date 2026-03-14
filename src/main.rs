@@ -61,12 +61,16 @@ fn main() {
                 let arg3 = CStr::from_bytes_until_nul(b"-i\0").unwrap();
                 let args = [arg0, arg1, arg2, arg3];
 
-                // For standardizing the shell prompts to `$`
+                // PS1 with colors: blue directory, yellow git branch, green venv
                 std::env::remove_var("PROMPT_COMMAND");
-                std::env::set_var("PS1", "$ ");
+                std::env::set_var("PROMPT_DIRTRIM", "2");
+                std::env::set_var(
+                    "PS1",
+                    "\\[\\033[1;34m\\]\\w\\[\\033[1;33m\\]$(git rev-parse --abbrev-ref HEAD 2>/dev/null | sed 's/.*/(&)/')\\[\\033[1;32m\\]$([ -n \"$VIRTUAL_ENV\" ] && echo \"($(basename \"$VIRTUAL_ENV\"))\")\\[\\033[0m\\] $ "
+                );
 
-                // Disable bracketed paste mode
-                std::env::set_var("TERM", "dumb");
+                // Enable colors
+                std::env::set_var("TERM", "xterm-256color");
 
                 nix::unistd::execvp(shell_name, &args).unwrap();
                 exit(1); // Only reached if execvp fails
@@ -134,6 +138,99 @@ fn get_char_size(cc: &egui::Context) -> (f32, f32) {
     return (width, height);
 }
 
+/// Parse ANSI escape codes and return a LayoutJob with colored text
+fn parse_ansi_to_layout(text: &str, ctx: &egui::Context) -> egui::text::LayoutJob {
+    use egui::text::{LayoutJob, TextFormat};
+    use egui::{Color32, FontId, TextStyle};
+
+    let font_id = ctx.style().text_styles[&TextStyle::Monospace].clone();
+    let mut job = LayoutJob::default();
+    job.wrap = egui::text::TextWrapping {
+        max_width: f32::INFINITY,
+        ..Default::default()
+    };
+
+    let mut current_color = Color32::WHITE;
+    let mut bold = false;
+    let mut chars = text.chars().peekable();
+    let mut current_text = String::new();
+
+    while let Some(c) = chars.next() {
+        if c == '\x1b' {
+            // Flush current text
+            if !current_text.is_empty() {
+                job.append(
+                    &current_text,
+                    0.0,
+                    TextFormat {
+                        font_id: font_id.clone(),
+                        color: current_color,
+                        ..Default::default()
+                    },
+                );
+                current_text.clear();
+            }
+
+            // Parse escape sequence
+            if chars.peek() == Some(&'[') {
+                chars.next(); // consume '['
+                let mut seq = String::new();
+                while let Some(&ch) = chars.peek() {
+                    if ch.is_ascii_digit() || ch == ';' {
+                        seq.push(chars.next().unwrap());
+                    } else {
+                        break;
+                    }
+                }
+                // Consume the final character (m, H, J, K, etc.)
+                if let Some(end_char) = chars.next() {
+                    if end_char == 'm' {
+                        // SGR (Select Graphic Rendition) - colors
+                        for code in seq.split(';') {
+                            match code.parse::<u8>() {
+                                Ok(0) => {
+                                    current_color = Color32::WHITE;
+                                    bold = false;
+                                }
+                                Ok(1) => bold = true,
+                                Ok(30) => current_color = if bold { Color32::DARK_GRAY } else { Color32::BLACK },
+                                Ok(31) => current_color = if bold { Color32::RED } else { Color32::DARK_RED },
+                                Ok(32) => current_color = if bold { Color32::GREEN } else { Color32::DARK_GREEN },
+                                Ok(33) => current_color = if bold { Color32::YELLOW } else { Color32::from_rgb(128, 128, 0) },
+                                Ok(34) => current_color = if bold { Color32::from_rgb(100, 149, 237) } else { Color32::BLUE },
+                                Ok(35) => current_color = if bold { Color32::from_rgb(255, 0, 255) } else { Color32::from_rgb(128, 0, 128) },
+                                Ok(36) => current_color = if bold { Color32::from_rgb(0, 255, 255) } else { Color32::from_rgb(0, 128, 128) },
+                                Ok(37) => current_color = if bold { Color32::WHITE } else { Color32::LIGHT_GRAY },
+                                Ok(39) => current_color = Color32::WHITE, // default fg
+                                _ => {}
+                            }
+                        }
+                    }
+                    // Ignore other escape sequences (cursor movement, etc.)
+                }
+            }
+        } else if c.is_ascii_graphic() || c.is_ascii_whitespace() {
+            current_text.push(c);
+        }
+        // Skip other control characters
+    }
+
+    // Flush remaining text
+    if !current_text.is_empty() {
+        job.append(
+            &current_text,
+            0.0,
+            TextFormat {
+                font_id: font_id.clone(),
+                color: current_color,
+                ..Default::default()
+            },
+        );
+    }
+
+    job
+}
+
 fn char_to_cursor_offset(
     character_pos: &(usize, usize),
     character_size: &(f32, f32),
@@ -163,22 +260,56 @@ impl eframe::App for Termion {
             }
             Ok(read_size) => {
                 let incoming = &buf[0..read_size];
-                for c in incoming {
+                let mut i = 0;
+                while i < incoming.len() {
+                    let c = incoming[i];
                     match c {
+                        b'\x1b' => {
+                            // Start of escape sequence - add to buffer but don't move cursor
+                            self.buf.push(c);
+                            i += 1;
+                            // Check for CSI sequence (ESC [)
+                            if i < incoming.len() && incoming[i] == b'[' {
+                                self.buf.push(incoming[i]);
+                                i += 1;
+                                // Skip until we find the terminating character (letter)
+                                while i < incoming.len() {
+                                    let seq_char = incoming[i];
+                                    self.buf.push(seq_char);
+                                    i += 1;
+                                    if seq_char.is_ascii_alphabetic() {
+                                        break;
+                                    }
+                                }
+                            }
+                        }
                         b'\x08' | b'\x7F' => {
                             // Backspace: move cursor back and remove character from buffer
                             if self.cursor_pos.0 > 0 {
                                 self.cursor_pos.0 -= 1;
                             }
                             self.buf.pop();
+                            i += 1;
                         }
                         b'\n' => {
                             self.cursor_pos = (0, 1 + self.cursor_pos.1);
-                            self.buf.push(*c);
+                            self.buf.push(c);
+                            i += 1;
+                        }
+                        b'\r' => {
+                            // Carriage return: move cursor to start of line
+                            self.cursor_pos.0 = 0;
+                            self.buf.push(c);
+                            i += 1;
+                        }
+                        _ if c.is_ascii_graphic() || c == b' ' || c == b'\t' => {
+                            self.cursor_pos = (1 + self.cursor_pos.0, self.cursor_pos.1);
+                            self.buf.push(c);
+                            i += 1;
                         }
                         _ => {
-                            self.cursor_pos = (1 + self.cursor_pos.0, self.cursor_pos.1);
-                            self.buf.push(*c);
+                            // Skip other control characters
+                            i += 1;
                         }
                     }
                 }
@@ -220,19 +351,18 @@ impl eframe::App for Termion {
                 }
             });
 
-        let binding = self.buf.clone();
-        let mut cleaned_output: String = binding
-            .iter()
-            .filter(|&&c| c.is_ascii_graphic() || c.is_ascii_whitespace())
-            .map(|&c| c as char)
-            .collect();
-
-        cleaned_output = cleaned_output.replace("[?2004h", "").replace("[?2004l", "");
+        // Convert buffer to string, keeping escape sequences for color parsing
+        let raw_output = String::from_utf8_lossy(&self.buf);
+        // Remove bracketed paste mode sequences
+        let cleaned_output = raw_output
+            .replace("\x1b[?2004h", "")
+            .replace("\x1b[?2004l", "");
 
         egui::CentralPanel::default().show(ctx, |ui| {
             egui::ScrollArea::both()
                 .auto_shrink([false; 2]) // Prevent shrinking; ensures resizing works
                 .stick_to_bottom(true) // For large commands, helps keep ip part in focus
+                .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::VisibleWhenNeeded)
                 .show(ui, |ui| {
                     ui.input(|input_state| {
                         for event in &input_state.events {
@@ -283,7 +413,8 @@ impl eframe::App for Termion {
                             }
                         }
                     });
-                    let response = ui.add(egui::Label::new(cleaned_output).wrap_mode(egui::TextWrapMode::Extend));
+                    let layout_job = parse_ansi_to_layout(&cleaned_output, ctx);
+                    let response = ui.add(egui::Label::new(layout_job).wrap_mode(egui::TextWrapMode::Extend));
 
                     let left = response.rect.left();
                     let bottom = response.rect.bottom();
