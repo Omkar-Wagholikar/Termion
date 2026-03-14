@@ -4,7 +4,6 @@ use nix::{
     fcntl::{fcntl, FcntlArg, OFlag},
     pty::{forkpty, ForkptyResult, Winsize},
     sys::wait::{waitpid, WaitPidFlag, WaitStatus},
-    unistd::Pid,
 };
 
 use core::f32;
@@ -141,7 +140,7 @@ fn get_char_size(cc: &egui::Context) -> (f32, f32) {
 /// Parse ANSI escape codes and return a LayoutJob with colored text
 fn parse_ansi_to_layout(text: &str, ctx: &egui::Context) -> egui::text::LayoutJob {
     use egui::text::{LayoutJob, TextFormat};
-    use egui::{Color32, FontId, TextStyle};
+    use egui::{Color32, TextStyle};
 
     let font_id = ctx.style().text_styles[&TextStyle::Monospace].clone();
     let mut job = LayoutJob::default();
@@ -244,6 +243,47 @@ fn char_to_cursor_offset(
     (x_offset, y_offset)
 }
 
+/// Remove the last visible character from the buffer, skipping escape sequences
+fn remove_last_visible_char(buf: &mut Vec<u8>) {
+    // Find the position of the last visible character
+    let mut i = buf.len();
+    while i > 0 {
+        i -= 1;
+        let c = buf[i];
+
+        // Check if this byte is the end of an escape sequence
+        if c.is_ascii_alphabetic() && i >= 2 {
+            // Look back to see if this is part of an escape sequence
+            let mut j = i - 1;
+            while j > 0 && (buf[j].is_ascii_digit() || buf[j] == b';') {
+                j -= 1;
+            }
+            if j > 0 && buf[j] == b'[' && j > 0 && buf[j - 1] == b'\x1b' {
+                // This is the end of an escape sequence, skip it entirely
+                i = j - 1;
+                continue;
+            }
+        }
+
+        // Check if we're inside an escape sequence
+        if c == b'[' && i > 0 && buf[i - 1] == b'\x1b' {
+            i -= 1;
+            continue;
+        }
+        if c == b'\x1b' {
+            continue;
+        }
+
+        // If it's a visible character, remove it
+        if c.is_ascii_graphic() || c == b' ' || c == b'\t' {
+            buf.remove(i);
+            return;
+        }
+
+        // Skip control characters
+    }
+}
+
 impl eframe::App for Termion {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         if self.character_size.is_none() {
@@ -284,11 +324,11 @@ impl eframe::App for Termion {
                             }
                         }
                         b'\x08' | b'\x7F' => {
-                            // Backspace: move cursor back and remove character from buffer
+                            // Backspace: move cursor back and remove last visible character
                             if self.cursor_pos.0 > 0 {
                                 self.cursor_pos.0 -= 1;
                             }
-                            self.buf.pop();
+                            remove_last_visible_char(&mut self.buf);
                             i += 1;
                         }
                         b'\n' => {
