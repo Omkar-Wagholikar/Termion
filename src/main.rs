@@ -3,6 +3,8 @@ use nix::{
     errno::Errno,
     fcntl::{fcntl, FcntlArg, OFlag},
     pty::{forkpty, ForkptyResult, Winsize},
+    sys::wait::{waitpid, WaitPidFlag, WaitStatus},
+    unistd::Pid,
 };
 
 use core::f32;
@@ -24,19 +26,40 @@ fn main() {
         match res {
             ForkptyResult::Parent { child, master } => {
                 println!("Parent process. Child PID: {} Master FD: Some_value", child);
+
+                // Give child a moment to start
+                std::thread::sleep(std::time::Duration::from_millis(100));
+
+                // Check if child is still alive
+                match waitpid(child, Some(WaitPidFlag::WNOHANG)) {
+                    Ok(WaitStatus::StillAlive) => println!("Child is still alive"),
+                    Ok(status) => println!("Child exited with status: {:?}", status),
+                    Err(e) => println!("waitpid error: {}", e),
+                }
+
+                // Try to read any initial output from PTY
+                let mut initial_buf = vec![0u8; 4096];
+                match nix::unistd::read(master.as_raw_fd(), &mut initial_buf) {
+                    Ok(n) => {
+                        let output = String::from_utf8_lossy(&initial_buf[..n]);
+                        println!("Initial PTY output ({} bytes): {:?}", n, output);
+                    }
+                    Err(e) => println!("Initial read: {}", e),
+                }
+
                 // File in non blocking mode to avoid freezing issue
                 fcntl(master.as_raw_fd(), FcntlArg::F_SETFL(OFlag::O_NONBLOCK))
                     .expect("Failed to set non-blocking mode");
                 Some(master) // Return the master file descriptor
             }
             ForkptyResult::Child => {
-                println!("Child process. Proceeding to execute shell...");
                 let shell_name = CStr::from_bytes_until_nul(b"/bin/bash\0")
                     .expect("Something went wrong in creating the shell_name");
                 let arg0 = CStr::from_bytes_until_nul(b"bash\0").unwrap();
                 let arg1 = CStr::from_bytes_until_nul(b"--norc\0").unwrap();
                 let arg2 = CStr::from_bytes_until_nul(b"--noprofile\0").unwrap();
-                let args = [arg0, arg1, arg2];
+                let arg3 = CStr::from_bytes_until_nul(b"-i\0").unwrap();
+                let args = [arg0, arg1, arg2, arg3];
 
                 // For standardizing the shell prompts to `$`
                 std::env::remove_var("PROMPT_COMMAND");
@@ -220,11 +243,15 @@ impl eframe::App for Termion {
                                 }
                                 egui::Event::Key { key, pressed, .. } => match key {
                                     egui::Key::Enter => {
-                                        if !self.current_command.trim().is_empty() {
-                                            self.command_history.push(self.current_command.clone());
+                                        if *pressed {
+                                            if !self.current_command.trim().is_empty() {
+                                                self.command_history.push(self.current_command.clone());
+                                            }
+                                            self.current_command.clear();
+                                            "\n"
+                                        } else {
+                                            ""
                                         }
-                                        self.current_command.clear();
-                                        "\n"
                                     }
                                     egui::Key::Backspace => {
                                         if *pressed && !self.current_command.is_empty() {
