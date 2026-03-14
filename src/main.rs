@@ -2,7 +2,7 @@ use eframe::egui;
 use nix::{
     errno::Errno,
     fcntl::{fcntl, FcntlArg, OFlag},
-    pty::{forkpty, ForkptyResult},
+    pty::{forkpty, ForkptyResult, Winsize},
 };
 
 use core::f32;
@@ -14,7 +14,13 @@ use std::{
 
 fn main() {
     let fd: Option<OwnedFd> = unsafe {
-        let res = forkpty(None, None).unwrap();
+        let winsize = Winsize {
+            ws_row: 50,
+            ws_col: 500,
+            ws_xpixel: 0,
+            ws_ypixel: 0,
+        };
+        let res = forkpty(Some(&winsize), None).unwrap();
         match res {
             ForkptyResult::Parent { child, master } => {
                 println!("Parent process. Child PID: {} Master FD: Some_value", child);
@@ -27,20 +33,20 @@ fn main() {
                 println!("Child process. Proceeding to execute shell...");
                 let shell_name = CStr::from_bytes_until_nul(b"/bin/bash\0")
                     .expect("Something went wrong in creating the shell_name");
-                let args: [&CStr; 0] = [];
+                let arg0 = CStr::from_bytes_until_nul(b"bash\0").unwrap();
+                let arg1 = CStr::from_bytes_until_nul(b"--norc\0").unwrap();
+                let arg2 = CStr::from_bytes_until_nul(b"--noprofile\0").unwrap();
+                let args = [arg0, arg1, arg2];
 
-                // // For standardizing the shell prompts to `$`
-                // // Also solves the issue of double enter on pressing one enter
+                // For standardizing the shell prompts to `$`
                 std::env::remove_var("PROMPT_COMMAND");
-                std::env::set_var("PS1", "$");
-                // std::env::set_var("PS1", "\\[\\e[?2004l\\]$ ");
-                //
+                std::env::set_var("PS1", "$ ");
+
                 // Disable bracketed paste mode
                 std::env::set_var("TERM", "dumb");
 
                 nix::unistd::execvp(shell_name, &args).unwrap();
-
-                exit(1);
+                exit(1); // Only reached if execvp fails
             }
         }
     };
@@ -251,15 +257,14 @@ impl eframe::App for Termion {
                     let (x_offset, y_offset) =
                         char_to_cursor_offset(&self.cursor_pos, character_size, &self.buf);
 
-                    painter.rect_filled(
-                        egui::Rect::from_min_size(
-                            egui::pos2(left + x_offset, bottom + y_offset),
-                            egui::vec2(character_size.0, character_size.1),
-                        ),
-                        0.0,
-                        egui::Color32::GREEN,
+                    let cursor_rect = egui::Rect::from_min_size(
+                        egui::pos2(left + x_offset, bottom + y_offset),
+                        egui::vec2(character_size.0, character_size.1),
                     );
-                    println!("{} {}", x_offset, y_offset);
+                    painter.rect_filled(cursor_rect, 0.0, egui::Color32::GREEN);
+
+                    // Auto-scroll to keep cursor visible
+                    ui.scroll_to_rect(cursor_rect, Some(egui::Align::Center));
                     ctx.request_repaint(); // Explicitly request a repaint
                 });
         });
