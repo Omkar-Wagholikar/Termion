@@ -207,12 +207,10 @@ impl eframe::App for Termion {
                                         "\n"
                                     }
                                     egui::Key::Backspace => {
-                                        println!("Hello world");
                                         if *pressed && !self.current_command.is_empty() {
                                             self.current_command.pop();
                                             let backspace_char = b'\x08'; // ASCII backspace character
-                                            nix::unistd::write(self.fd.as_fd(), &[backspace_char])
-                                                .unwrap();
+                                            let _ = nix::unistd::write(self.fd.as_fd(), &[backspace_char]);
                                             ""
                                             // "\x08" // ASCII backspace character, TODO: Get ansi escape codes to work, the backspace is working but not reflected in the UI
                                             // "\x7F" // Delete character (DEL)
@@ -230,14 +228,20 @@ impl eframe::App for Termion {
                             let bytes = temp_text.as_bytes();
 
                             let mut to_write: &[u8] = &bytes;
-                            while to_write.len() > 0 {
-                                let written =
-                                    nix::unistd::write(self.fd.as_fd(), to_write).unwrap();
-                                to_write = &to_write[written..];
+                            while !to_write.is_empty() {
+                                match nix::unistd::write(self.fd.as_fd(), to_write) {
+                                    Ok(written) => to_write = &to_write[written..],
+                                    Err(e) => {
+                                        if e != Errno::EPIPE {
+                                            println!("Write error: {}", e);
+                                        }
+                                        break;
+                                    }
+                                }
                             }
                         }
                     });
-                    let response = ui.label(cleaned_output);
+                    let response = ui.add(egui::Label::new(cleaned_output).wrap_mode(egui::TextWrapMode::Extend));
 
                     let left = response.rect.left();
                     let bottom = response.rect.bottom();
