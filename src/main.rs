@@ -142,11 +142,23 @@ impl eframe::App for Termion {
                 let incoming = &buf[0..read_size];
                 for c in incoming {
                     match c {
-                        b'\n' => self.cursor_pos = (0, 1 + self.cursor_pos.1),
-                        _ => self.cursor_pos = (1 + self.cursor_pos.0, self.cursor_pos.1),
+                        b'\x08' | b'\x7F' => {
+                            // Backspace: move cursor back and remove character from buffer
+                            if self.cursor_pos.0 > 0 {
+                                self.cursor_pos.0 -= 1;
+                            }
+                            self.buf.pop();
+                        }
+                        b'\n' => {
+                            self.cursor_pos = (0, 1 + self.cursor_pos.1);
+                            self.buf.push(*c);
+                        }
+                        _ => {
+                            self.cursor_pos = (1 + self.cursor_pos.0, self.cursor_pos.1);
+                            self.buf.push(*c);
+                        }
                     }
                 }
-                self.buf.extend_from_slice(incoming);
             }
             Err(e) => {
                 if e != Errno::EAGAIN {
@@ -217,14 +229,9 @@ impl eframe::App for Termion {
                                     egui::Key::Backspace => {
                                         if *pressed && !self.current_command.is_empty() {
                                             self.current_command.pop();
-                                            let backspace_char = b'\x08'; // ASCII backspace character
-                                            let _ = nix::unistd::write(self.fd.as_fd(), &[backspace_char]);
-                                            ""
-                                            // "\x08" // ASCII backspace character, TODO: Get ansi escape codes to work, the backspace is working but not reflected in the UI
-                                            // "\x7F" // Delete character (DEL)
-                                        } else {
-                                            ""
+                                            let _ = nix::unistd::write(self.fd.as_fd(), b"\x7F");
                                         }
+                                        ""
                                     }
                                     _ => "",
                                 },
